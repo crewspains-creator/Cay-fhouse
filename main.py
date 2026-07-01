@@ -256,8 +256,7 @@ def update_netflix_progress(bot, chat_id, message_id, counts, plan_counts,
         valid = counts.get("hits", 0) + counts.get("free", 0) + counts.get("on_hold", 0)
         percentage = int((processed / cookies_total) * 100) if cookies_total > 0 else 0
 
-        # Progress bar
-        bar_length = 22
+        bar_length = 20
         filled = int(bar_length * processed / cookies_total) if cookies_total > 0 else 0
         bar = "█" * filled + "░" * (bar_length - filled)
 
@@ -266,42 +265,46 @@ def update_netflix_progress(bot, chat_id, message_id, counts, plan_counts,
         hit_rate = int((valid / processed) * 100) if processed > 0 else 0
 
         if stopped:
-            status = "🛑 <b>Status:</b> Stopped (Paused)"
+            status_line = "🛑 <b>Status:</b> Stopped (Paused)"
         elif completed:
-            status = "✅ <b>Status:</b> Completed"
+            status_line = "✅ <b>Status:</b> Completed"
         else:
-            status = "🔄 <b>Status:</b> Scanning..."
+            status_line = "🔄 <b>Status:</b> Scanning..."
 
         text = (
             f"<b>🎬 NETFLIX COOKIE CHECKER</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{status}\n"
+            f"{status_line}\n"
             f"<code>{bar}</code> <b>{percentage}%</b>\n"
             f"📦 <b>Progress:</b> {processed} / {cookies_total}\n\n"
         )
 
-        # Plan breakdown
-        text += "<b>📈 Plan Breakdown</b>\n"
-        default_order = ["premium", "standard_with_ads", "standard", "basic", "mobile", "free"]
-        for plan in default_order:
-            if plan_counts.get(plan, 0) > 0:
-                label = plan.replace("_", " ").title()
-                text += f"• {label}: <b>{plan_counts[plan]}</b>\n"
+        # Plan Counts
+        text += "<b>📈 Plan Counts</b>\n"
+        plan_order = ["premium", "standard_with_ads", "standard", "basic", "mobile", "free"]
+        for p in plan_order:
+            if plan_counts.get(p, 0) > 0:
+                label = p.replace("_", " ").title()
+                text += f"{label}: <b>{plan_counts[p]}</b>\n"
         if plan_counts.get("on_hold", 0) > 0:
-            text += f"• On Hold: <b>{plan_counts['on_hold']}</b>\n"
+            text += f"On Hold: <b>{plan_counts['on_hold']}</b>\n"
 
+        # Status
+        text += "\n<b>Status</b>\n"
+        text += f"Valid: <b>{valid}</b>\n"
+        text += f"Good : <b>{counts.get('hits', 0)}</b>\n"
+        text += f"Free : <b>{counts.get('free', 0)}</b>\n"
+        text += f"Bad  : <b>{counts.get('bad', 0)}</b>\n"
+        text += f"Dup  : <b>{counts.get('duplicate', 0)}</b>\n"
+        text += f"OnHold: <b>{counts.get('on_hold', 0)}</b>\n"
+        text += f"Err  : <b>{counts.get('errors', 0)}</b>\n\n"
+
+        # Live Stats
         text += (
-            f"\n<b>📊 Live Stats</b>\n"
-            f"✅ Valid: <b>{valid}</b>   "
-            f"❌ Failed: <b>{counts.get('bad', 0)}</b>\n"
-            f"🔄 Duplicate: <b>{counts.get('duplicate', 0)}</b>   "
-            f"⚠️ Errors: <b>{counts.get('errors', 0)}</b>\n\n"
             f"⚡️ <b>CPM:</b> {cpm}   "
             f"⏱️ <b>Time:</b> {int(elapsed)}s   "
             f"💎 <b>Hit Rate:</b> {hit_rate}%\n"
         )
 
-        # Recent hits
         if recent_hits:
             display = list(recent_hits)[-6:]
             text += "\n<b>🎯 Recent Hits:</b>\n"
@@ -3288,6 +3291,27 @@ def check_cookies(num_threads=30, config=None):
 
     def record_result(result_type, cookie_label, plan_key=None, plan_name=None, result_reason=None, result_country=None, result_on_hold=False):
         with header_lock:
+            #==================== LIVE PROGRESS UPDATE ====================
+            current_session = None
+            for uid, sess in active_sessions.items():
+                if sess.get("stop_event") and not sess["stop_event"].is_set():
+                    current_session = sess
+                    break
+
+            if current_session:
+                sc = current_session["counts"]
+                if result_type == "success":
+                    sc["hits"] += 1
+                elif result_type == "free":
+                    sc["free"] += 1
+                elif result_type == "failed":
+                    sc["bad"] += 1
+                elif result_type == "duplicate":
+                    sc["duplicate"] += 1
+                else:
+                    sc["errors"] += 1
+            # ============================================================
+
             if result_type == "success":
                 counts["hits"] += 1
                 if result_on_hold:
