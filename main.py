@@ -3304,6 +3304,7 @@ def check_cookies(num_threads=30, config=None):
                     break
 
             if current_session:
+                current_session["cookies_left"][0] -= 1
                 sc = current_session["counts"]
                 if result_type == "success":
                     sc["hits"] += 1
@@ -3492,10 +3493,11 @@ def check_cookies(num_threads=30, config=None):
                             break
 
                     if current_session:
+                        current_session["cookies_left"][0] -= 1
                         sc = current_session["counts"]
                         sp = current_session["plan_counts"]
                         sr = current_session["recent_hits"]
-
+                        
                         if result_type == "success":
                             sc["hits"] += 1
                             if result_on_hold:
