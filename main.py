@@ -259,7 +259,7 @@ def update_netflix_progress(bot, chat_id, message_id, counts, plan_counts,
     with progress_lock:
         processed = cookies_total - cookies_left[0] if isinstance(cookies_left, list) else cookies_total - cookies_left
         valid = counts.get("hits", 0) + counts.get("free", 0) + counts.get("on_hold", 0)
-        percentage = int((processed / cookies_total) * 100) if cookies_total > 0 else 0
+        percentage = min(int((processed / cookies_total) * 100), 100) if cookies_total > 0 else 0
 
         bar_length = 20
         filled = int(bar_length * processed / cookies_total) if cookies_total > 0 else 0
@@ -267,41 +267,44 @@ def update_netflix_progress(bot, chat_id, message_id, counts, plan_counts,
 
         elapsed = time.time() - (start_time or time.time())
         cpm = int(processed / (elapsed / 60)) if elapsed > 5 else 0
-        hit_rate = int((valid / processed) * 100) if processed > 0 else 0
+        hit_rate = min(int((valid / processed) * 100), 100) if processed > 0 else 0
 
         if stopped:
-            status_line = "🛑 <b>Status:</b> Stopped (Paused)"
+            status_emoji = "🛑"
+            status_text = "Stopped (Paused)"
         elif completed:
-            status_line = "✅ <b>Status:</b> Completed"
+            status_emoji = "✅"
+            status_text = "Completed"
         else:
-            status_line = "🔄 <b>Status:</b> Scanning..."
+            status_emoji = "🔄"
+            status_text = "Scanning..."
 
         text = (
             f"<b>🎬 NETFLIX COOKIE CHECKER</b>\n"
-            f"{status_line}\n"
+            f"{status_emoji} <b>Status:</b> {status_text}\n"
             f"<code>{bar}</code> <b>{percentage}%</b>\n"
             f"📦 <b>Progress:</b> {processed} / {cookies_total}\n\n"
         )
 
-        # Plan Counts
+        # Plan Counts (like Account Counts in Prime)
         text += "<b>📈 Plan Counts</b>\n"
         plan_order = ["premium", "standard_with_ads", "standard", "basic", "mobile", "free"]
         for p in plan_order:
             if plan_counts.get(p, 0) > 0:
                 label = p.replace("_", " ").title()
-                text += f"{label}: <b>{plan_counts[p]}</b>\n"
+                text += f"• {label}: <b>{plan_counts[p]}</b>\n"
         if plan_counts.get("on_hold", 0) > 0:
-            text += f"On Hold: <b>{plan_counts['on_hold']}</b>\n"
+            text += f"• On Hold: <b>{plan_counts['on_hold']}</b>\n"
 
-        # Status
+        # Status Section (like Live Stats in Prime)
         text += "\n<b>Status</b>\n"
-        text += f"Valid: <b>{valid}</b>\n"
-        text += f"Good : <b>{counts.get('hits', 0)}</b>\n"
-        text += f"Free : <b>{counts.get('free', 0)}</b>\n"
-        text += f"Bad  : <b>{counts.get('bad', 0)}</b>\n"
-        text += f"Dup  : <b>{counts.get('duplicate', 0)}</b>\n"
-        text += f"OnHold: <b>{counts.get('on_hold', 0)}</b>\n"
-        text += f"Err  : <b>{counts.get('errors', 0)}</b>\n\n"
+        text += f"✅ Valid: <b>{valid}</b>\n"
+        text += f"🟢 Good: <b>{counts.get('hits', 0)}</b>\n"
+        text += f"🟣 Free: <b>{counts.get('free', 0)}</b>\n"
+        text += f"🔴 Bad: <b>{counts.get('bad', 0)}</b>\n"
+        text += f"🔵 Dup: <b>{counts.get('duplicate', 0)}</b>\n"
+        text += f"🟡 OnHold: <b>{counts.get('on_hold', 0)}</b>\n"
+        text += f"⚠️ Err: <b>{counts.get('errors', 0)}</b>\n\n"
 
         # Live Stats
         text += (
@@ -3493,7 +3496,6 @@ def check_cookies(num_threads=30, config=None):
                             break
 
                     if current_session:
-                        current_session["cookies_left"][0] -= 1
                         sc = current_session["counts"]
                         sp = current_session["plan_counts"]
                         sr = current_session["recent_hits"]
