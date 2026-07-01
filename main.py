@@ -3207,7 +3207,25 @@ def check_cookies(num_threads=30, config=None):
         chosen_index = random.choice(available)
         return proxies[chosen_index], chosen_index
 
-    def handle_result(info, netscape_content, cookie_path, cookie_file, is_subscribed, cookie_dict, remove_source=True):
+    def handle_result(info, netscape_content, cookie_path, cookie_file, is_subscribed, cookie_dict, remove_source=True, 
+                    shared_counts=None, shared_plan_counts=None, shared_recent_hits=None):
+
+    # ==================== LIVE PROGRESS UPDATE ====================
+        user_id = None
+        for uid, sess in active_sessions.items():
+            if sess.get("stop_event") and not sess["stop_event"].is_set():
+                user_id = uid
+                break
+
+        if user_id:
+            sess = active_sessions[user_id]
+            shared_counts = sess["counts"]
+            shared_plan_counts = sess["plan_counts"]
+            shared_recent = sess["recent_hits"]
+        else:
+            shared_counts = shared_plan_counts = shared_recent = None
+        # ============================================================
+
         create_base_folders()
         user_guid = info.get("userGuid") if info.get("userGuid") and info.get("userGuid") != "null" else generate_unknown_guid()
         plan_key, plan_folder_label, plan_name = derive_output_plan_bucket(info, is_subscribed)
@@ -3434,14 +3452,37 @@ def check_cookies(num_threads=30, config=None):
                     is_subscribed = is_subscribed_account(info)
                     result_country = info.get("countryOfSignup")
                     result_type, plan_key, plan_name, result_on_hold = handle_result(
-                        info,
-                        netscape_content,
-                        cookie_path,
-                        bundle_file,
-                        is_subscribed,
-                        cookies,
-                        remove_source=remove_source_during_result,
+                        info, netscape_content, cookie_path, bundle_file, is_subscribed, cookies,
+                        remove_source=remove_source_during_result
                     )
+                    # ==================== LIVE PROGRESS UPDATE ====================
+                    current_session = None
+                    for uid, sess in active_sessions.items():
+                        if sess.get("stop_event") and not sess["stop_event"].is_set():
+                            current_session = sess
+                            break
+
+                    if current_session:
+                        sc = current_session["counts"]
+                        sp = current_session["plan_counts"]
+                        sr = current_session["recent_hits"]
+
+                        if result_type == "success":
+                            sc["hits"] += 1
+                            if result_on_hold:
+                                sc["on_hold"] += 1
+                            if plan_key:
+                                sp[plan_key] = sp.get(plan_key, 0) + 1
+
+                        elif result_type == "free":
+                            sc["free"] += 1
+                            if plan_key:
+                                sp[plan_key] = sp.get(plan_key, 0) + 1
+
+                        if plan_name:
+                            display_name = f"{plan_name} ({result_country or '??'})"
+                            sr.append(display_name)
+                    # ============================================================
                 else:
                     result_type = "failed"
                     result_reason = "incomplete account page"
