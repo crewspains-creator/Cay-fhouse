@@ -8,6 +8,7 @@ import re
 import shutil
 import string
 import sys
+import zipfile
 import threading
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,10 @@ BOT_USERNAME = "YourNetflixBot"          # ← Change this to your bot username
 
 # Shared state for live progress (thread-safe via lock)
 progress_lock = threading.Lock()
+
+def random_number_string(length=6):
+    """Generate a random number string of given length"""
+    return ''.join(random.choices(string.digits, k=length))
 
 DEFAULT_CONFIG = {
     "txt_fields": {
@@ -3735,24 +3740,77 @@ def main():
             file_info = bot.get_file(message.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
             original_name = message.document.file_name or "uploaded_file"
+            filename_lower = original_name.lower()
 
-            if original_name.lower() == "proxy.txt":
-                with open(proxy_file, "wb") as f:
-                    f.write(downloaded_file)
-                bot.send_message(chat_id, "✅ <b>proxy.txt updated successfully!</b>\nProxies will be used on next /check.")
+            # ==================== ZIP FILE SUPPORT ====================
+            if filename_lower.endswith('.zip'):
+                try:
+                    temp_zip_path = os.path.join(cookies_folder, original_name)
+                    with open(temp_zip_path, 'wb') as f:
+                        f.write(downloaded_file)
+
+                    extracted_count = 0
+                    with zipfile.ZipFile(temp_zip_path, 'r') as zipf:
+                        for file_info in zipf.infolist():
+                            if file_info.filename.lower().endswith(('.txt', '.json')) and not file_info.filename.startswith('__'):
+                                base, ext = os.path.splitext(os.path.basename(file_info.filename))
+                                unique_name = f"{base}_{random_number_string(6)}{ext}"
+                                target_path = os.path.join(cookies_folder, unique_name)
+                                with zipf.open(file_info) as source, open(target_path, 'wb') as target:
+                                    target.write(source.read())
+                                extracted_count += 1
+
+                    os.remove(temp_zip_path)
+
+                    current_count = len([f for f in os.listdir(cookies_folder) if f.lower().endswith(('.txt', '.json'))])
+                    bot.send_message(
+                        chat_id,
+                        f"✅ Successfully extracted <b>{extracted_count}</b> cookie file(s) from ZIP.\n"
+                        f"📁 <b>Total cookies ready:</b> <code>{current_count}</code>\n"
+                        f"Use /check when ready!",
+                        parse_mode='HTML'
+                    )
+                    return
+                except Exception as e:
+                    bot.send_message(chat_id, f"❌ Failed to process ZIP file: {str(e)}")
+                    return
+
+            # ==================== SINGLE COOKIE FILE ====================
+            if filename_lower.endswith(('.txt', '.json')) and not filename_lower.startswith("proxy"):
+                try:
+                    content = downloaded_file.decode("utf-8", errors="ignore")
+                    base, ext = os.path.splitext(original_name)
+                    unique_name = f"{base}_{random_number_string(6)}{ext}"
+                    save_path = os.path.join(cookies_folder, unique_name)
+
+                    with open(save_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+
+                    current_count = len([f for f in os.listdir(cookies_folder) if f.lower().endswith(('.txt', '.json'))])
+                    bot.send_message(
+                        chat_id,
+                        f"✅ Saved cookie file <code>{original_name}</code>\n"
+                        f"📁 <b>Total cookies ready:</b> <code>{current_count}</code>\n"
+                        f"Use /check when ready!",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    bot.send_message(chat_id, f"❌ Failed to save cookie file: {str(e)}")
                 return
 
-            if original_name.lower().endswith((".txt", ".json")):
-                # Save to cookies folder (allow multiple, user manages with /clear)
-                safe_name = re.sub(r'[<>:"/\\|?*]+', "_", original_name).strip()
-                if not safe_name.lower().endswith((".txt", ".json")):
-                    safe_name += ".txt"
-                save_path = os.path.join(cookies_folder, safe_name)
-                with open(save_path, "wb") as f:
-                    f.write(downloaded_file)
-                bot.send_message(chat_id, f"✅ Cookie file saved: <code>{safe_name}</code>\n\nUse /check when ready to process all cookies in the folder.")
-            else:
-                bot.send_message(chat_id, "❌ Unsupported file type.\nPlease upload <b>.txt</b> or <b>.json</b> cookie files, or <b>proxy.txt</b>.")
+            # ==================== PROXY FILE ====================
+            if "proxy" in filename_lower or filename_lower == "proxy.txt":
+                try:
+                    with open(proxy_file, 'wb') as f:
+                        f.write(downloaded_file)
+                    proxies = load_proxies()
+                    bot.send_message(chat_id, f"✅ Proxy list updated successfully!\nLoaded <b>{len(proxies)}</b> proxies.", parse_mode='HTML')
+                except Exception as e:
+                    bot.send_message(chat_id, f"❌ Failed to save proxy list: {str(e)}")
+                return
+
+            bot.send_message(chat_id, "❌ Only <b>.txt</b>, <b>.json</b>, or <b>.zip</b> files are allowed (or proxy.txt).")
+
         except Exception as e:
             bot.send_message(chat_id, f"❌ Error processing file: {str(e)}")
 
