@@ -12,6 +12,9 @@ import threading
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+import time
+import threading
+from collections import deque
 
 import requests
 from urllib3.exceptions import InsecureRequestWarning
@@ -25,6 +28,13 @@ try:
     import telebot
 except ImportError:
     telebot = None
+
+# ==================== LIVE PROGRESS CONFIG ====================
+active_sessions = {}
+BOT_USERNAME = "YourNetflixBot"          # ← Change this to your bot username
+
+# Shared state for live progress (thread-safe via lock)
+progress_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "txt_fields": {
@@ -216,6 +226,97 @@ NFTOKEN_HEADERS = {
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
+def start_netflix_live_updater(bot, chat_id, message_id, counts, plan_counts, 
+                               cookies_left, cookies_total, start_time, recent_hits, 
+                               stop_event, config=None):
+    while cookies_left[0] > 0:
+        time.sleep(2)
+        if stop_event.is_set():
+            break
+        try:
+            update_netflix_progress(
+                bot, chat_id, message_id,
+                counts, plan_counts,
+                cookies_left, cookies_total,
+                start_time, recent_hits,
+                config=config
+            )
+        except Exception:
+            pass
+
+def update_netflix_progress(bot, chat_id, message_id, counts, plan_counts, 
+                            cookies_left, cookies_total, start_time=None, 
+                            recent_hits=None, completed=False, stopped=False, 
+                            zip_filename=None, config=None):
+    if not bot or not chat_id or not message_id:
+        return
+
+    with progress_lock:
+        processed = cookies_total - cookies_left[0] if isinstance(cookies_left, list) else cookies_total - cookies_left
+        valid = counts.get("hits", 0) + counts.get("free", 0) + counts.get("on_hold", 0)
+        percentage = int((processed / cookies_total) * 100) if cookies_total > 0 else 0
+
+        # Progress bar
+        bar_length = 22
+        filled = int(bar_length * processed / cookies_total) if cookies_total > 0 else 0
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        elapsed = time.time() - (start_time or time.time())
+        cpm = int(processed / (elapsed / 60)) if elapsed > 5 else 0
+        hit_rate = int((valid / processed) * 100) if processed > 0 else 0
+
+        if stopped:
+            status = "🛑 <b>Status:</b> Stopped (Paused)"
+        elif completed:
+            status = "✅ <b>Status:</b> Completed"
+        else:
+            status = "🔄 <b>Status:</b> Scanning..."
+
+        text = (
+            f"<b>🎬 NETFLIX COOKIE CHECKER</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{status}\n"
+            f"<code>{bar}</code> <b>{percentage}%</b>\n"
+            f"📦 <b>Progress:</b> {processed} / {cookies_total}\n\n"
+        )
+
+        # Plan breakdown
+        text += "<b>📈 Plan Breakdown</b>\n"
+        default_order = ["premium", "standard_with_ads", "standard", "basic", "mobile", "free"]
+        for plan in default_order:
+            if plan_counts.get(plan, 0) > 0:
+                label = plan.replace("_", " ").title()
+                text += f"• {label}: <b>{plan_counts[plan]}</b>\n"
+        if plan_counts.get("on_hold", 0) > 0:
+            text += f"• On Hold: <b>{plan_counts['on_hold']}</b>\n"
+
+        text += (
+            f"\n<b>📊 Live Stats</b>\n"
+            f"✅ Valid: <b>{valid}</b>   "
+            f"❌ Failed: <b>{counts.get('bad', 0)}</b>\n"
+            f"🔄 Duplicate: <b>{counts.get('duplicate', 0)}</b>   "
+            f"⚠️ Errors: <b>{counts.get('errors', 0)}</b>\n\n"
+            f"⚡️ <b>CPM:</b> {cpm}   "
+            f"⏱️ <b>Time:</b> {int(elapsed)}s   "
+            f"💎 <b>Hit Rate:</b> {hit_rate}%\n"
+        )
+
+        # Recent hits
+        if recent_hits:
+            display = list(recent_hits)[-6:]
+            text += "\n<b>🎯 Recent Hits:</b>\n"
+            for h in display:
+                text += f"<code>{h}</code>\n"
+
+        keyboard = telebot.types.InlineKeyboardMarkup()
+        if not completed and not stopped:
+            keyboard.add(telebot.types.InlineKeyboardButton("🛑 Stop", callback_data="stop_netflix_check"))
+
+        try:
+            bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, 
+                                  parse_mode='HTML', reply_markup=keyboard)
+        except:
+            pass
 
 def _decode_hidden_text(values):
     return "".join(chr(value ^ _pull_bias()) for value in values)
@@ -3593,77 +3694,150 @@ def main():
     @bot.message_handler(commands=["check"])
     def start_check_command(message):
         chat_id = message.chat.id
-        bot_state["last_chat_id"] = chat_id
+        user_id = str(chat_id)
 
-        if bot_state["checking"]:
-            bot.send_message(chat_id, "⚠️ A check is already in progress. Please wait for it to finish.")
+        # Prevent multiple checks at the same time
+        if user_id in active_sessions:
+            bot.reply_to(message, "⚠️ You already have a check running!\nUse /stop to pause it first.")
             return
 
+        # Get cookie files
         cookie_files = [f for f in os.listdir(cookies_folder) if f.lower().endswith((".txt", ".json"))]
         if not cookie_files:
-            bot.send_message(chat_id, "❌ No cookie files found in the <code>cookies/</code> folder.\n\nPlease upload .txt or .json cookie files first.")
+            bot.reply_to(message, "❌ No cookie files found in the <code>cookies/</code> folder.\n\nPlease upload some .txt or .json files first.")
             return
 
-        bot_state["checking"] = True
-        bot.send_message(
+        total_cookies = len(cookie_files)
+
+        # ==================== SHARED STATE (for live progress) ====================
+        counts = {
+            "hits": 0,
+            "free": 0,
+            "bad": 0,
+            "duplicate": 0,
+            "on_hold": 0,
+            "errors": 0
+        }
+        plan_counts = {}
+        cookies_left = [total_cookies]
+        recent_hits = deque(maxlen=10)
+        stop_event = threading.Event()
+        start_time = time.time()
+
+        # Register active session
+        active_sessions[user_id] = {
+            "counts": counts,
+            "plan_counts": plan_counts,
+            "cookies_left": cookies_left,
+            "cookies_total": total_cookies,
+            "recent_hits": recent_hits,
+            "stop_event": stop_event,
+            "start_time": start_time,
+        }
+
+        # Send initial progress message
+        progress_msg = bot.send_message(
             chat_id,
-            f"🚀 <b>Starting Netflix cookie check...</b>\n\n"
-            f"• Files to process: <b>{len(cookie_files)}</b>\n"
-            f"• Threads: 30 (default)\n"
-            f"• Live detailed progress is shown in the <b>terminal/console</b> where you launched this bot.\n\n"
-            f"⏳ Please wait... When finished I will send you a ZIP archive with all results."
+            "🚀 <b>Netflix Cookie Check Started</b>\n"
+            f"📦 Total cookies: <b>{total_cookies}</b>\n"
+            "Live progress will update below...",
+            parse_mode="HTML"
         )
 
-        def run_check_and_notify():
+        # ==================== RUN CHECKER IN BACKGROUND ====================
+        def run_checker():
             try:
-                # Call the ORIGINAL untouched check_cookies function
-                # All logic, threading, NFTokens, output folders, notifications etc. remain 100% the same
+                # Call your original check_cookies function (core logic untouched)
                 check_cookies(30, config)
 
-                # After completion, locate the newest run folder and send ZIP
+                # After check finishes - find latest run folder and create ZIP
                 latest_run = None
                 if os.path.exists(output_folder):
                     runs = sorted(
-                        [d for d in os.listdir(output_folder) if d.startswith("run_") and os.path.isdir(os.path.join(output_folder, d))],
+                        [d for d in os.listdir(output_folder) if d.startswith("run_")],
                         reverse=True
                     )
                     if runs:
                         latest_run = runs[0]
 
+                zip_path = None
                 if latest_run:
                     run_path = os.path.join(output_folder, latest_run)
                     zip_base = os.path.join(output_folder, latest_run)
                     zip_path = zip_base + ".zip"
 
-                    # Create zip (overwrite if exists)
                     if os.path.exists(zip_path):
                         os.remove(zip_path)
                     shutil.make_archive(zip_base, "zip", run_path)
 
+                # Final progress update
+                update_netflix_progress(
+                    bot, chat_id, progress_msg.message_id,
+                    counts, plan_counts,
+                    cookies_left, total_cookies,
+                    start_time, recent_hits,
+                    completed=True,
+                    zip_filename=os.path.basename(zip_path) if zip_path else None,
+                    config=config
+                )
+
+                # Send the ZIP file
+                if zip_path and os.path.exists(zip_path):
                     with open(zip_path, "rb") as zip_file:
                         bot.send_document(
                             chat_id,
                             zip_file,
                             caption=(
-                                f"✅ <b>Checking complete!</b>\n\n"
-                                f"📦 Results packaged in: <code>{latest_run}.zip</code>\n"
-                                f"📁 Also available locally in: <code>output/{latest_run}/</code>\n\n"
-                                f"Same folder structure as the original CLI version."
+                                f"✅ <b>Check Completed!</b>\n\n"
+                                f"📦 Results saved in: <code>{latest_run}.zip</code>\n"
+                                f"📁 Also available locally in <code>output/{latest_run}/</code>"
                             )
                         )
-                    # Optional: remove the zip after sending to save space
-                    # os.remove(zip_path)
-                else:
-                    bot.send_message(chat_id, "✅ Checking finished, but no output run folder was created (maybe all failed or no valid cookies).")
 
-            except Exception as exc:
-                bot.send_message(chat_id, f"❌ Error during checking: {str(exc)}")
+            except Exception as e:
+                bot.send_message(chat_id, f"❌ Error during checking: {str(e)}")
             finally:
-                bot_state["checking"] = False
-                bot.send_message(chat_id, "🏁 Bot is ready for the next batch. Use /clear + upload new cookies if needed.")
+                # Cleanup
+                active_sessions.pop(user_id, None)
+                stop_event.set()
 
-        # Run checker in background thread so the bot remains responsive
-        threading.Thread(target=run_check_and_notify, daemon=True).start()
+        # Start checker thread
+        threading.Thread(target=run_checker, daemon=True).start()
+
+        # Start live progress updater thread
+        threading.Thread(
+            target=start_netflix_live_updater,
+            args=(
+                bot, chat_id, progress_msg.message_id,
+                counts, plan_counts,
+                cookies_left, total_cookies,
+                start_time, recent_hits,
+                stop_event, config
+            ),
+            daemon=True
+        ).start()
+
+
+
+    @bot.callback_query_handler(func=lambda call: call.data == "stop_netflix_check")
+    def stop_netflix_check(call):
+        user_id = str(call.message.chat.id)
+        if user_id in active_sessions:
+            active_sessions[user_id]["stop_event"].set()
+            update_netflix_progress(
+                bot, call.message.chat.id, call.message.message_id,
+                active_sessions[user_id]["counts"],
+                active_sessions[user_id]["plan_counts"],
+                active_sessions[user_id]["cookies_left"],
+                active_sessions[user_id]["cookies_total"],
+                active_sessions[user_id]["start_time"],
+                active_sessions[user_id]["recent_hits"],
+                stopped=True
+            )
+            bot.answer_callback_query(call.id, "Check stopped.")
+        else:
+            bot.answer_callback_query(call.id, "No active check found.")
+
 
     # Fallback for any other text
     @bot.message_handler(func=lambda m: True)
