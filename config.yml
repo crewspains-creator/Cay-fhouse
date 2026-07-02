@@ -43,7 +43,7 @@ notifications:
     plans: "all" # use "all" or multiple like ["premium", "standard_with_ads", "standard", "basic", "mobile", "free"]
 
 display:
-  mode: "simple" # allowed: "log" or "simple"
+  mode: "log" # allowed: "log" or "simple"
 
 retries:
   error_proxy_attempts: 4 # retry attempts on network/proxy errors (rotates proxy each try)
