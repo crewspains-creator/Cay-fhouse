@@ -3872,7 +3872,7 @@ def main():
         def run_checker():
             try:
                 # Call your original check_cookies function (core logic untouched)
-                check_cookies(30, config)
+                check_cookies(10, config)
 
                 # After check finishes - find latest run folder and create ZIP
                 latest_run = None
