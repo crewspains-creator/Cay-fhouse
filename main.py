@@ -234,7 +234,7 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 def start_netflix_live_updater(bot, chat_id, message_id, counts, plan_counts, 
                                cookies_left, cookies_total, start_time, recent_hits, 
                                stop_event, config=None):
-    while cookies_left[0] > 0:
+    while not stop_event.is_set():  # ← change from "cookies_left[0] > 0"
         time.sleep(2)
         if stop_event.is_set():
             break
